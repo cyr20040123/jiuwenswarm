@@ -1375,6 +1375,15 @@ def prepare_workspace(
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
 
+    # 模板迁移按模板裁剪 react.subagents,用户自有的自定义 agent 条目会被清除;
+    # 按 agents/*.md 存量定义自愈注册(harness_evolve)。失败不阻断初始化主流程。
+    try:
+        from jiuwenswarm.harness_evolve.config_registry import ensure_custom_agents_enabled
+
+        ensure_custom_agents_enabled()
+    except Exception:  # noqa: BLE001
+        logger.warning("[init_workspace] custom agent registry self-heal failed", exc_info=True)
+
     # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----
     _install_default_builtin_skills(
         builtin_dir=get_builtin_skills_dir(),

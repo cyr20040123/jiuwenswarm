@@ -13918,6 +13918,40 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] stop_dreaming failed: %s", exc)
 
 
+# 自定义子代理的工具名清单(与 harness_evolve/tools_registry 保持一致:
+# 文件工具由 SysOperationRail 派生,不在此构造)
+_SUBAGENT_FILE_TOOL_NAMES = frozenset(
+    ["Read", "Write", "Edit", "Bash", "LS", "Grep", "Glob", "LSP"]
+)
+
+
+def _resolve_subagent_tools(tool_names: list[str], *, agent_id: str) -> list[Any]:
+    """工具名 → Tool 实例(openjiuwen factory 只接受 Tool|ToolCard)。
+
+    文件工具由 SysOperationRail 派生(见 SubAgentConfig.rails);WebSearch/
+    WebFetch 与主 agent 同款类构造;未知名无声明式映射,告警跳过。
+    """
+    from openjiuwen.harness import tools as _otools
+
+    resolved: list[Any] = []
+    wanted = set(tool_names)
+    if "*" in wanted:
+        wanted = _SUBAGENT_FILE_TOOL_NAMES | {"WebSearch", "WebFetch"}
+    for name in sorted(wanted):
+        if name in _SUBAGENT_FILE_TOOL_NAMES:
+            continue  # 由 SysOperationRail 派生
+        if name == "WebSearch":
+            resolved.append(_otools.WebFreeSearchTool(agent_id=agent_id))
+        elif name == "WebFetch":
+            resolved.append(_otools.WebFetchWebpageTool(agent_id=agent_id))
+        else:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] 自定义子代理工具 %r 无声明式映射,跳过",
+                name,
+            )
+    return resolved
+
+
 def _agent_def_to_subagent_config(
     agent_def: AgentDefinition,
     model: Any,
@@ -13945,9 +13979,17 @@ def _agent_def_to_subagent_config(
         resolved_model = model_cache.get(agent_def.model, model)
 
     # Build tool list: merge allowed tools and disallowed_tools
-    tools: list[str] = list(agent_def.tools) if agent_def.tools else ["*"]
-    if agent_def.disallowed_tools and tools != ["*"]:
-        tools = [t for t in tools if t not in agent_def.disallowed_tools]
+    tool_names: list[str] = list(agent_def.tools) if agent_def.tools else ["*"]
+    if agent_def.disallowed_tools and tool_names != ["*"]:
+        tool_names = [t for t in tool_names if t not in agent_def.disallowed_tools]
+
+    # openjiuwen 工厂只接受 Tool|ToolCard 实例——字符串工具名会在
+    # factory._normalize_tools 里崩溃('str' object has no attribute 'name')。
+    # 这里把 jiuwenswarm 工具名解析为真正的工具实例:
+    # - 文件工具(Read/Write/Edit/Bash/…)由下方 rails 的 SysOperationRail 派生;
+    # - WebSearch/WebFetch 构造实例(工厂会注册进 resource_mgr);
+    # - 其余工具名无声明式映射,告警跳过。
+    tools = _resolve_subagent_tools(tool_names, agent_id=f"subagent_{agent_def.name}")
 
     # A stable id keeps ``create_deep_agent`` on its get-or-create path for this
     # sub-agent's SysOperation: the id is derived from the card, and the default
@@ -13965,12 +14007,19 @@ def _agent_def_to_subagent_config(
         agent_card=card,
         system_prompt=agent_def.prompt,
         tools=tools,
+        # 文件工具宿主:与 general-purpose 子代理同款做法(factory 默认 rail
+        # 列表不含 SysOperationRail,不显式挂上则子代理没有任何文件工具)
+        rails=[SysOperationRail()],
         model=resolved_model,
         workspace=workspace,
         sys_operation=sys_operation,
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
-        enable_task_loop=True,
+        # task-loop 模式要求调用方绑定 Session,而 TaskTool 的 invoke 不传
+        # session(报 "session is required for task-loop mode");与
+        # general-purpose 子代理一致用单轮模式——单轮内仍是完整 ReAct
+        # 工具循环,多步工具使用不受影响。
+        enable_task_loop=False,
     )
 
 
